@@ -826,3 +826,82 @@ func TestPlanCommandRunner_AtlantisApplyStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestPlanCommandRunner_DeleteStalePlans(t *testing.T) {
+	logger := logging.NewNoopLogger(t)
+	RegisterMockTestingT(t)
+
+	cases := []struct {
+		Description     string
+		ProjectContexts []command.ProjectContext
+		ProjectResults  []command.ProjectResult
+		PrevPlanStored  bool
+		PlanFailed      bool
+	}{
+		{
+			Description:    "When change reverted, plans should be discarded (autoplan)",
+			PrevPlanStored: true,
+			ProjectContexts: []command.ProjectContext{
+				{
+					AbortOnExecutionOrderFail: true,
+					AutoplanEnabled:           true,
+					CommandName:               command.Plan,
+					ParallelPlanEnabled:       true,
+					ProjectName:               "Autoplan",
+					Workspace:                 "autoplan",
+				},
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.Description, func(t *testing.T) {
+
+			tmp := t.TempDir()
+			db, err := db.New(tmp)
+			t.Cleanup(func() {
+				db.Close()
+			})
+			Ok(t, err)
+
+			_ = setup(t, func(tc *TestConfig) {
+				tc.backend = db
+			})
+
+			scopeNull, _, _ := metrics.NewLoggingScope(logger, "atlantis")
+
+			modelPull := models.PullRequest{BaseRepo: testdata.GithubRepo, State: models.OpenPullState, Num: testdata.Pull.Num}
+
+			cmd := &events.CommentCommand{Name: command.Plan}
+
+			ctx := &command.Context{
+				User:     testdata.User,
+				Log:      logging.NewNoopLogger(t),
+				Scope:    scopeNull,
+				Pull:     modelPull,
+				HeadRepo: testdata.GithubRepo,
+				Trigger:  command.CommentTrigger,
+			}
+
+			if c.PrevPlanStored {
+				_, err := db.UpdatePullWithResults(modelPull, []command.ProjectResult{
+					{
+						Command:     command.Plan,
+						RepoRelDir:  "prevdir",
+						Workspace:   "default",
+						PlanSuccess: &models.PlanSuccess{},
+					},
+				})
+				Ok(t, err)
+			}
+
+			When(projectCommandBuilder.BuildPlanCommands(ctx, cmd)).Then(func(args []Param) ReturnValues {
+				return ReturnValues{[]command.ProjectContext{}, nil}
+			})
+
+			planCommandRunner.Run(ctx, cmd)
+
+		})
+	}
+
+}
